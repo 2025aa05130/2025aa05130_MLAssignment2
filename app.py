@@ -11,9 +11,6 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 
 
-# -----------------------------
-# Page config
-# -----------------------------
 st.set_page_config(page_title="BITS ML Assignment 2", layout="wide")
 st.title("BITS ML Assignment 2 — Multi-Model Classification App")
 
@@ -43,7 +40,7 @@ if not FEATURES:
 
 
 # -----------------------------
-# Model registry (must match your saved filenames)
+# Model registry
 # -----------------------------
 MODEL_FILES = {
     "Logistic Regression": "model/Logistic_Regression.pkl",
@@ -61,7 +58,6 @@ def load_model(path: str):
 
 
 def positive_class_proba_if_available(model, X):
-    """Return positive-class probabilities if model supports predict_proba; else None."""
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba(X)
         if isinstance(proba, np.ndarray) and proba.ndim == 2 and proba.shape[1] >= 2:
@@ -70,7 +66,6 @@ def positive_class_proba_if_available(model, X):
 
 
 def plot_cm(cm: np.ndarray):
-    """Simple confusion matrix visualization with matplotlib (no seaborn)."""
     fig, ax = plt.subplots()
     ax.imshow(cm)
     ax.set_xlabel("Predicted")
@@ -81,10 +76,6 @@ def plot_cm(cm: np.ndarray):
 
 
 def build_inverse_label_map(label_map: dict):
-    """
-    Convert LABEL_MAP like {"0": "Malignant", "1": "Benign"}
-    into {"malignant": 0, "benign": 1}
-    """
     inv = {}
     if isinstance(label_map, dict):
         for k, v in label_map.items():
@@ -96,36 +87,31 @@ def build_inverse_label_map(label_map: dict):
 
 
 def normalize_y_true(y_true_series: pd.Series, label_map: dict):
-    """
-    Make y_true numeric (0/1) if possible, handling:
-      - already numeric 0/1
-      - strings "0"/"1"
-      - "Benign"/"Malignant"
-      - "B"/"M"
-      - values matching LABEL_MAP descriptions
-    Returns: (y_true_np, ok, message)
-    """
+    # Drop blanks that look like "nan" strings
+    y_clean = y_true_series.copy()
+
     # If already numeric
-    if pd.api.types.is_numeric_dtype(y_true_series):
-        y = pd.to_numeric(y_true_series, errors="coerce")
+    if pd.api.types.is_numeric_dtype(y_clean):
+        y = pd.to_numeric(y_clean, errors="coerce")
         if y.isna().any():
             return None, False, "Target column contains NaN or non-numeric values."
         return y.astype(int).to_numpy().ravel(), True, ""
 
-    # Convert to clean strings
-    y_str = y_true_series.astype(str).str.strip().str.lower()
+    y_str = y_clean.astype(str).str.strip().str.lower()
 
-    # First try numeric conversion from strings "0"/"1"
+    # remove empty strings
+    y_str = y_str.replace({"": np.nan, "nan": np.nan, "none": np.nan})
+    if y_str.isna().any():
+        # caller already drops NaNs, but just in case:
+        y_str = y_str.dropna()
+
+    # numeric strings
     y_num = pd.to_numeric(y_str, errors="coerce")
     if not y_num.isna().any():
         return y_num.astype(int).to_numpy().ravel(), True, ""
 
-    # Build mapping from label_map + common values
     inv = build_inverse_label_map(label_map)
-    inv.update({
-        "malignant": 0, "m": 0,
-        "benign": 1, "b": 1
-    })
+    inv.update({"malignant": 0, "m": 0, "benign": 1, "b": 1})
 
     y_mapped = y_str.map(inv)
     if y_mapped.isna().any():
@@ -136,13 +122,12 @@ def normalize_y_true(y_true_series: pd.Series, label_map: dict):
 
 
 # -----------------------------
-# Sidebar controls
+# Sidebar
 # -----------------------------
 st.sidebar.header("Controls")
 model_name = st.sidebar.selectbox("Select Model", list(MODEL_FILES.keys()))
 mode = st.sidebar.radio("Mode", ["Upload Test CSV", "Manual Single Prediction"])
 
-# Load selected model
 try:
     model = load_model(MODEL_FILES[model_name])
 except FileNotFoundError:
@@ -166,96 +151,122 @@ if mode == "Upload Test CSV":
 
     uploaded = st.file_uploader("Upload CSV", type=["csv"])
 
-    if uploaded is not None:
-        df = pd.read_csv(uploaded)
-
-        st.markdown("### Preview")
-        st.dataframe(df.head())
-
-        # Choose target column (optional)
-        default_index = 0
-        if TARGET_DEFAULT in df.columns:
-            default_index = 1
-
-        target_col = st.selectbox(
-            "Target column (optional). Select 'None' for prediction-only CSV.",
-            ["None"] + list(df.columns),
-            index=default_index
-        )
-
-        # Validate feature columns
-        missing = [c for c in FEATURES if c not in df.columns]
-        if missing:
-            st.error(
-                "Your CSV is missing required feature columns.\n\n"
-                f"Missing columns: {missing}\n\n"
-                "Fix: Use the same column names as meta.json (training features)."
-            )
-            st.stop()
-
-        X_input = df[FEATURES].copy()
-        y_pred = model.predict(X_input)
-
-        # Show predictions
-        out = pd.DataFrame({"prediction": y_pred})
-        if LABEL_MAP:
-            out["prediction_label"] = out["prediction"].astype(str).map(LABEL_MAP).fillna(out["prediction"].astype(str))
-
-        st.markdown("### Predictions (first 50)")
-        st.dataframe(out.head(50))
-
-        # If ground truth provided, compute metrics + CM + report
-        if target_col != "None":
-            st.markdown("## Evaluation Results")
-
-            # Drop rows where target is missing and align y_pred
-            mask = df[target_col].notna()
-            if mask.sum() == 0:
-                st.error("Target column selected but all target values are empty/NaN.")
-                st.stop()
-
-            df_eval = df.loc[mask].copy()
-            X_eval = df_eval[FEATURES].copy()
-            y_pred_eval = np.array(y_pred)[mask.to_numpy()]
-
-            # Normalize y_true
-            y_true, ok, msg = normalize_y_true(df_eval[target_col], LABEL_MAP)
-            if not ok:
-                st.error(msg)
-                st.stop()
-
-            # Metrics
-            acc = accuracy_score(y_true, y_pred_eval)
-            prec = precision_score(y_true, y_pred_eval, zero_division=0)
-            rec = recall_score(y_true, y_pred_eval, zero_division=0)
-            f1 = f1_score(y_true, y_pred_eval, zero_division=0)
-            mcc = matthews_corrcoef(y_true, y_pred_eval)
-
-            # AUC only if proba exists
-            y_prob = positive_class_proba_if_available(model, X_eval)
-            auc = roc_auc_score(y_true, y_prob) if y_prob is not None else None
-
-            metrics = {
-                "Accuracy": float(acc),
-                "AUC": float(auc) if auc is not None else "Not available (no predict_proba)",
-                "Precision": float(prec),
-                "Recall": float(rec),
-                "F1": float(f1),
-                "MCC": float(mcc),
-            }
-
-            st.markdown("### Metrics")
-            st.json(metrics)
-
-            st.markdown("### Confusion Matrix")
-            cm = confusion_matrix(y_true, y_pred_eval)
-            plot_cm(cm)
-
-            st.markdown("### Classification Report")
-            st.text(classification_report(y_true, y_pred_eval, zero_division=0))
-
-    else:
+    if uploaded is None:
         st.info("Upload a CSV to proceed.")
+        st.stop()
+
+    df = pd.read_csv(uploaded)
+
+    st.markdown("### Preview")
+    st.dataframe(df.head())
+
+    default_index = 0
+    if TARGET_DEFAULT in df.columns:
+        default_index = 1
+
+    target_col = st.selectbox(
+        "Target column (optional). Select 'None' for prediction-only CSV.",
+        ["None"] + list(df.columns),
+        index=default_index
+    )
+
+    missing = [c for c in FEATURES if c not in df.columns]
+    if missing:
+        st.error(
+            "Your CSV is missing required feature columns.\n\n"
+            f"Missing columns: {missing}\n\n"
+            "Fix: Use the same column names as meta.json (training features)."
+        )
+        st.stop()
+
+    X_input = df[FEATURES].copy()
+    y_pred = model.predict(X_input)
+
+    out = pd.DataFrame({"prediction": y_pred})
+    if LABEL_MAP:
+        out["prediction_label"] = out["prediction"].astype(str).map(LABEL_MAP).fillna(out["prediction"].astype(str))
+
+    st.markdown("### Predictions (first 50)")
+    st.dataframe(out.head(50))
+
+    if target_col == "None":
+        st.stop()
+
+    st.markdown("## Evaluation Results")
+
+    # Align rows where target exists
+    mask = df[target_col].notna()
+    if mask.sum() == 0:
+        st.error("Target column selected but all target values are empty/NaN.")
+        st.stop()
+
+    df_eval = df.loc[mask].copy()
+    X_eval = df_eval[FEATURES].copy()
+    y_pred_eval = np.array(y_pred)[mask.to_numpy()]
+
+    y_true, ok, msg = normalize_y_true(df_eval[target_col], LABEL_MAP)
+    if not ok:
+        st.error(msg)
+        st.stop()
+
+    acc = accuracy_score(y_true, y_pred_eval)
+
+    labels_present = np.unique(np.concatenate([np.asarray(y_true), np.asarray(y_pred_eval)]))
+    single_class = (len(labels_present) < 2)
+
+    if single_class:
+        st.warning(
+            f"Only one class found in uploaded data/predictions ({labels_present.tolist()}). "
+            "Precision/Recall/F1 and AUC are not well-defined for a single-class set."
+        )
+        prec = "Not defined (single class)"
+        rec = "Not defined (single class)"
+        f1v = "Not defined (single class)"
+        auc = "Not defined (single class)"
+    else:
+        # Auto-average to avoid multiclass/binary crash
+        n_classes = len(labels_present)
+        avg = "binary" if n_classes == 2 else "macro"
+        if avg != "binary":
+            st.warning(f"Detected {n_classes} classes {labels_present.tolist()} → using average='{avg}' for Precision/Recall/F1.")
+
+        prec = float(precision_score(y_true, y_pred_eval, average=avg, zero_division=0))
+        rec = float(recall_score(y_true, y_pred_eval, average=avg, zero_division=0))
+        f1v = float(f1_score(y_true, y_pred_eval, average=avg, zero_division=0))
+
+        y_prob = positive_class_proba_if_available(model, X_eval)
+        if avg == "binary" and y_prob is not None:
+            auc = float(roc_auc_score(y_true, y_prob))
+        else:
+            auc = "Not available"
+
+    mcc = float(matthews_corrcoef(y_true, y_pred_eval))
+
+    metrics = {
+        "Accuracy": float(acc),
+        "AUC": auc,
+        "Precision": prec,
+        "Recall": rec,
+        "F1": f1v,
+        "MCC": mcc,
+    }
+
+    st.markdown("### Metrics")
+    st.json(metrics)
+
+    st.markdown("### Confusion Matrix")
+    # If your dataset is binary, keep labels [0,1]; otherwise let sklearn infer
+    if len(np.unique(y_true)) <= 2:
+        cm = confusion_matrix(y_true, y_pred_eval, labels=[0, 1])
+    else:
+        cm = confusion_matrix(y_true, y_pred_eval)
+    plot_cm(cm)
+
+    st.markdown("### Classification Report")
+    if len(np.unique(y_true)) <= 2:
+        st.text(classification_report(y_true, y_pred_eval, labels=[0, 1], zero_division=0))
+    else:
+        st.text(classification_report(y_true, y_pred_eval, zero_division=0))
 
 
 # -----------------------------
